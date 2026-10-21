@@ -1,96 +1,137 @@
 from abc import ABC, abstractmethod
-from sklearn.ensemble import RandomForestClassifier
+
 import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.exceptions import NotFittedError
+from sklearn.utils.validation import check_is_fitted
+
 
 class DigitClassificationInterface(ABC):
-    @abstractmethod
-    def preprocess(self, image):
-        pass
+    """Common interface for all MNIST digit classification models."""
 
     @abstractmethod
-    def train(self, image):
-        pass
+    def preprocess(self, image: np.ndarray):
+        """Convert a (28, 28, 1) image into the input format of the model."""
 
     @abstractmethod
-    def predict(self, image) -> int:
-        pass
-    
+    def train(self, *args, **kwargs):
+        """Train the model."""
 
+    @abstractmethod
+    def predict(self, image: np.ndarray) -> int:
+        """Take a (28, 28, 1) image and return a digit 0-9."""
+
+
+class CNNModel(DigitClassificationInterface):
+    """Wraps an already trained CNN (e.g. a Keras model).
+
+    Expected input: tensor of shape (28, 28, 1); the model gets a batch
+    of shape (1, 28, 28, 1) and must return class probabilities via
+    `model.predict(batch)`.
+    """
+
+    def __init__(self, model=None):
+        self.model = model
+
+    def preprocess(self, image: np.ndarray) -> np.ndarray:
+        image = np.asarray(image, dtype=np.float32)
+        if image.max() > 1.0:
+            image = image / 255.0
+        return image.reshape(1, 28, 28, 1)  # add batch dimension
+
+    def train(self, *args, **kwargs):
+        raise NotImplementedError("Training is not implemented for CNNModel.")
+
+    def predict(self, image: np.ndarray) -> int:
+        if self.model is None:
+            raise RuntimeError("CNNModel has no trained model attached.")
+        batch = self.preprocess(image)
+        probs = np.asarray(self.model.predict(batch))
+        return int(np.argmax(probs, axis=-1).ravel()[0])
 
 
 class RandomForest(DigitClassificationInterface):
+    """Random Forest on a flat vector of length 784."""
 
-    # def __init__(self):
-    #     self.model = RandomForestClassifier()
+    def __init__(self, model: RandomForestClassifier = None):
+        self.model = model if model is not None else RandomForestClassifier()
 
-    def preprocess(self, image):
-        image = np.asarray(image)
-        flattened = image.reshape(784)
+    def preprocess(self, image: np.ndarray) -> np.ndarray:
+        image = np.asarray(image, dtype=np.float32)
+        if image.max() > 1.0:
+            image = image / 255.0
+        return image.reshape(1, 784)  # sklearn expects 2D: (n_samples, 784)
 
-        return flattened
-
-    def predict(self, image:np.ndarray) -> int:
-        data = self.preprocess(image)
-
-        return "Here will be the prediction"
-
-    def train(self, image):
-        pass
-
-class RandomModel(DigitClassificationInterface):
-
-    def preprocess(self, image):
-        image = np.asarray(image)
-
-        # Center crop: (28, 28, 1) -> (10, 10, 1)
-        cropped = image[9:19, 9:19, :]
-        
-        return cropped
+    def train(self, *args, **kwargs):
+        raise NotImplementedError("Training is not implemented for RandomForest.")
 
     def predict(self, image: np.ndarray) -> int:
+        try:
+            check_is_fitted(self.model)
+        except NotFittedError:
+            raise RuntimeError("RandomForest model is not trained/fitted.")
+        data = self.preprocess(image)
+        return int(self.model.predict(data)[0])
 
-        input = self.preprocess(image)
+
+class RandomModel(DigitClassificationInterface):
+    """Returns a random digit. Input: 10x10 center crop."""
+
+    def preprocess(self, image: np.ndarray) -> np.ndarray:
+        image = np.asarray(image)
+        return image[9:19, 9:19, :].reshape(10, 10)
+
+    def train(self, *args, **kwargs):
+        raise NotImplementedError("Training is not implemented for RandomModel.")
+
+    def predict(self, image: np.ndarray) -> int:
+        _ = self.preprocess(image)
         return int(np.random.randint(0, 10))
 
 
-# class DigitClassifier:
+class DigitClassifier:
+    """Single entry point: same input/output regardless of the algorithm.
 
-#     def __init__(self, algorithm: str, models: dict):
-#         algorithms = {
-#             "cnn": CNNModel,
-#             "rf": RandomForest,
-#             "rand": RandomModel,
-#         }
+    Usage:
+        DigitClassifier("rand").predict(img)
+        DigitClassifier("rf", model=fitted_rf).predict(img)
+        DigitClassifier("cnn", model=trained_cnn).predict(img)
+    """
 
-#         if algorithm not in algorithms:
-#             raise ValueError(
-#                 f"Unknown algorithm: {algorithm}. "
-#                 f"Choose from {list(algorithms)}."
-#             )
+    ALGORITHMS = {
+        "cnn": CNNModel,
+        "rf": RandomForest,
+        "rand": RandomModel,
+    }
 
-#         if algorithm == "rand":
-#             self.model = RandomModel()
-#         else:
-#             if algorithm not in models:
-#                 raise ValueError(
-#                     f"A model instance must be provided for '{algorithm}'."
-#                 )
-#             self.model = algorithms[algorithm](models[algorithm])
+    def __init__(self, algorithm: str, model=None):
+        if algorithm not in self.ALGORITHMS:
+            raise ValueError(
+                f"Unknown algorithm: {algorithm!r}. "
+                f"Choose from {list(self.ALGORITHMS)}."
+            )
+        cls = self.ALGORITHMS[algorithm]
+        # RandomModel needs no underlying model; others accept an optional one
+        self.model: DigitClassificationInterface = (
+            cls() if algorithm == "rand" else cls(model)
+        )
 
-#     def predict(self, image: np.ndarray) -> int:
-#         image = np.asarray(image)
+    def predict(self, image: np.ndarray) -> int:
+        image = np.asarray(image)
+        if image.shape != (28, 28, 1):
+            raise ValueError(f"Expected image shape (28, 28, 1), got {image.shape}")
+        return int(self.model.predict(image))
 
-#         if image.shape != (28, 28, 1):
-#             raise ValueError(
-#                 f"Expected image shape (28, 28, 1), got {image.shape}"
-#             )
+    def train(self, *args, **kwargs):
+        raise NotImplementedError("Training is not implemented in DigitClassifier.")
 
-#         return int(self.model.predict(image))
 
-#     def train(self, *args, **kwargs):
-#         raise NotImplementedError(
-#             "Training is not implemented in DigitClassifier."
-#         )
+if __name__ == "__main__":
+    img = np.random.randint(0, 256, size=(28, 28, 1))
+    print("rand:", DigitClassifier("rand").predict(img))
 
-model_forest = RandomForest()
-model_forest.preprocess()
+    # Quick demo for rf with a dummy fit (replace with real MNIST training)
+    rf = RandomForestClassifier(n_estimators=5).fit(
+        np.random.rand(50, 784), np.random.randint(0, 10, 50)
+    )
+    print("rf:", DigitClassifier("rf", model=rf).predict(img))
